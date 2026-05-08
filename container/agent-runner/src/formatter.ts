@@ -105,12 +105,16 @@ export interface RoutingContext {
  * Uses the first message's routing fields.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const first = messages[0];
+  // Prefer a real channel message (non-agent) over agent/system messages so
+  // that an approval notification or a2a echo landing before the user's
+  // message in the batch doesn't hijack routing and send replies to the agent
+  // group instead of back to the user.
+  const preferred = messages.find((m) => m.channel_type && m.channel_type !== 'agent') ?? messages[0];
   return {
-    platformId: first?.platform_id ?? null,
-    channelType: first?.channel_type ?? null,
-    threadId: first?.thread_id ?? null,
-    inReplyTo: first?.id ?? null,
+    platformId: preferred?.platform_id ?? null,
+    channelType: preferred?.channel_type ?? null,
+    threadId: preferred?.thread_id ?? null,
+    inReplyTo: preferred?.id ?? null,
   };
 }
 

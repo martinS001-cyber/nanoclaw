@@ -111,6 +111,13 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
                     "@anthropic-ai/claude-code-linux-x64@${CLAUDE_CODE_VERSION}" && \
     node "$(find -L /pnpm/global -name 'install.cjs' -path '*claude-code/install.cjs' 2>/dev/null | head -1)"
 
+# ---- Extra tools -------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        pandoc \
+    && rm -rf /var/lib/apt/lists/*
+
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

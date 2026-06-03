@@ -257,4 +257,3 @@ registerChannelAdapter('telegram-2', {
     return makeTelegramAdapter(env.TELEGRAM_BOT2_TOKEN, 'telegram-2');
   },
 });
-

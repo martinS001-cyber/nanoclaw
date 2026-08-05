@@ -5,6 +5,9 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
+import { writeMessageOut } from '../db/messages-out.js';
+import { getSessionRouting } from '../db/session-routing.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -152,6 +155,94 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   return lines.join('\n');
 }
 
+// ── Email tool approval gate ──
+// The email MCP server (email-smtp-imap-mcp, wired via the .email-mcp
+// container skill) has no built-in confirmation step, and the mailbox owner
+// wants an explicit yes/no before anything leaves the inbox or gets moved
+// out of it. There's no "delete" verb in this MCP server — the closest
+// analogue is emails_modify with move_to_folder set (e.g. into Trash), so
+// that's gated the same as a delete. Reuses the same blocking
+// write-then-poll primitive as mcp__nanoclaw__ask_user_question: write an
+// ask_question card to the current chat, then poll inbound.db for the
+// user's reply. Approver is whoever is in this conversation — this tool
+// only ever runs in a single-user DM context, so there's no separate
+// admin-approval routing the way self-mod actions have.
+const EMAIL_SEND_TOOLS = new Set(['mcp__email__email_send', 'mcp__email__email_respond']);
+const EMAIL_MODIFY_TOOL = 'mcp__email__emails_modify';
+const EMAIL_APPROVAL_TIMEOUT_MS = 300_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function generateApprovalId(): string {
+  return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isEmailActionGated(toolName: string, toolInput: Record<string, unknown>): boolean {
+  if (EMAIL_SEND_TOOLS.has(toolName)) return true;
+  if (toolName === EMAIL_MODIFY_TOOL) {
+    return typeof toolInput.move_to_folder === 'string' && toolInput.move_to_folder.length > 0;
+  }
+  return false;
+}
+
+function describeEmailAction(toolName: string, toolInput: Record<string, unknown>): string {
+  const toList = (v: unknown): string => (Array.isArray(v) ? v.join(', ') : String(v ?? '(none)'));
+  if (toolName === 'mcp__email__email_send') {
+    return `Send an email\nTo: ${toList(toolInput.to)}\nSubject: ${toolInput.subject ?? '(no subject)'}`;
+  }
+  if (toolName === 'mcp__email__email_respond') {
+    const kind = toolInput.response_type ?? 'reply';
+    return `${kind} to an email\nTo: ${toList(toolInput.to) || '(original recipients)'}`;
+  }
+  if (toolName === EMAIL_MODIFY_TOOL) {
+    const count = Array.isArray(toolInput.email_ids) ? toolInput.email_ids.length : 0;
+    return `Move ${count} email(s) to folder: ${toolInput.move_to_folder}`;
+  }
+  return toolName;
+}
+
+/**
+ * Block until the user approves or rejects, by writing an ask_question card
+ * to the current chat and polling inbound.db for the response — same
+ * mechanism mcp__nanoclaw__ask_user_question uses. No response within the
+ * timeout is treated as reject (fail closed).
+ */
+async function requestInlineEmailApproval(title: string, description: string): Promise<boolean> {
+  const questionId = generateApprovalId();
+  const r = getSessionRouting();
+  writeMessageOut({
+    id: questionId,
+    kind: 'chat-sdk',
+    platform_id: r.platform_id,
+    channel_type: r.channel_type,
+    thread_id: r.thread_id,
+    content: JSON.stringify({
+      type: 'ask_question',
+      questionId,
+      title,
+      question: description,
+      options: [
+        { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve' },
+        { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject' },
+      ],
+    }),
+  });
+
+  const deadline = Date.now() + EMAIL_APPROVAL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const response = findQuestionResponse(questionId);
+    if (response) {
+      const parsed = JSON.parse(response.content);
+      markCompleted([response.id]);
+      return parsed.selectedOption === 'approve';
+    }
+    await sleep(1000);
+  }
+  return false;
+}
+
 /**
  * PreToolUse hook: record the current tool + its declared timeout so the host
  * sweep can widen its stuck tolerance while Bash is running a long-declared
@@ -167,10 +258,34 @@ const preToolUseHook: HookCallback = async (input) => {
       stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
     } as unknown as ReturnType<HookCallback>;
   }
+
+  const toolInput = i.tool_input ?? {};
+  if (isEmailActionGated(toolName, toolInput)) {
+    // Declared timeout covers the approval wait itself, so host-sweep stale
+    // detection doesn't treat the pause as a hung container.
+    try {
+      setContainerToolInFlight(toolName, EMAIL_APPROVAL_TIMEOUT_MS);
+    } catch (err) {
+      log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const approved = await requestInlineEmailApproval('Email approval needed', describeEmailAction(toolName, toolInput));
+    try {
+      clearContainerToolInFlight();
+    } catch (err) {
+      log(`PreToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!approved) {
+      return {
+        decision: 'block',
+        stopReason: 'Not approved — the user rejected or did not respond to the approval request for this email action.',
+      } as unknown as ReturnType<HookCallback>;
+    }
+    return { continue: true };
+  }
+
   // Bash exposes its timeout via the tool_input.timeout field (ms). Any other
   // tool: no declared timeout.
-  const declaredTimeoutMs =
-    toolName === 'Bash' && typeof i.tool_input?.timeout === 'number' ? (i.tool_input.timeout as number) : null;
+  const declaredTimeoutMs = toolName === 'Bash' && typeof toolInput.timeout === 'number' ? (toolInput.timeout as number) : null;
   try {
     setContainerToolInFlight(toolName, declaredTimeoutMs);
   } catch (err) {

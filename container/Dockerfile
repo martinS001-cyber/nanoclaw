@@ -120,6 +120,11 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
     chmod +x /usr/local/bin/ncl
 
+# ---- email-mcp wrapper ---------------------------------------------------------
+# Reads mounted credentials file, execs email-smtp-imap-mcp with them as env vars.
+COPY email-mcp-wrapper.sh /usr/local/bin/email-mcp-wrapper
+RUN chmod +x /usr/local/bin/email-mcp-wrapper
+
 # ---- pandoc --------------------------------------------------------------------
 # Document conversion CLI (markdown/html/docx/odt/epub/rst/etc). Pinned to the
 # bookworm apt version so a rebuild never silently picks up a newer one. No

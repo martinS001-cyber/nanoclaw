@@ -120,6 +120,23 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
     chmod +x /usr/local/bin/ncl
 
+# ---- poppler-utils --------------------------------------------------------------
+# PDF text extraction (pdftotext, pdfinfo, pdftoppm). Small and well-maintained
+# compared to a full PDF toolkit, and covers the common "read this PDF" case.
+ARG POPPLER_VERSION=22.12.0-2+deb12u3
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        "poppler-utils=${POPPLER_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- html2pdf wrapper ------------------------------------------------------------
+# PDF generation without a dedicated PDF engine: reuses the Chromium already
+# installed for agent-browser (headless print-to-pdf) instead of adding
+# wkhtmltopdf (~400MB) or weasyprint (~900MB of Python/numpy/scipy).
+COPY html2pdf.sh /usr/local/bin/html2pdf
+RUN chmod +x /usr/local/bin/html2pdf
+
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

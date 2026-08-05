@@ -120,6 +120,19 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
     chmod +x /usr/local/bin/ncl
 
+# ---- pandoc --------------------------------------------------------------------
+# Document conversion CLI (markdown/html/docx/odt/epub/rst/etc). Pinned to the
+# bookworm apt version so a rebuild never silently picks up a newer one. No
+# LaTeX engine is installed here (texlive-xetex alone is 500MB+), so
+# `-o out.pdf` isn't available directly — see the html2pdf wrapper below for
+# PDF export via pandoc + Chromium instead.
+ARG PANDOC_VERSION=2.17.1.1-2~deb12u1
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        "pandoc=${PANDOC_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
 # ---- poppler-utils --------------------------------------------------------------
 # PDF text extraction (pdftotext, pdfinfo, pdftoppm). Small and well-maintained
 # compared to a full PDF toolkit, and covers the common "read this PDF" case.

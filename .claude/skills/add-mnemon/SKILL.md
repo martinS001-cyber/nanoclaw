@@ -54,22 +54,34 @@ ENV MNEMON_DATA_DIR=/home/node/.claude/mnemon
 
 `MNEMON_DATA_DIR` points into the per-agent-group `.claude/` mount, so memory persists across container restarts.
 
-### 2. Entrypoint — run mnemon setup on each container start
+### 2. Wire mnemon setup into the actual runtime spawn command
 
-`mnemon setup` is idempotent. Run it once per `container/entrypoint.sh`. First check whether the line is already present:
+**`container/entrypoint.sh` is not the runtime path for real sessions.** NanoClaw v2's dynamic container spawn overrides the Dockerfile `ENTRYPOINT` entirely — `src/container-runner.ts`'s `buildContainerArgs` pushes `--entrypoint bash` and its own `-c '<script>'`, so `entrypoint.sh` (and the `tini` PID 1 it runs under) never executes for a real session. Wiring `mnemon setup` only into `entrypoint.sh` looks correct but silently does nothing — no error, no log line, hooks just never register. Verify this assumption still holds before applying (v2's architecture could change):
 
 ```bash
-grep -q 'mnemon setup' container/entrypoint.sh && echo "Already wired" || echo "Wire it"
+grep -n "'-c'," src/container-runner.ts
 ```
 
-If it prints `Wire it`, add the setup call right after `set -e`, before the `cat` that captures stdin, so the result looks like:
+You should see a line like `args.push('-c', 'exec bun run /app/src/index.ts');`. That is the real target.
+
+First check whether it's already wired:
 
 ```bash
-#!/bin/bash
-# NanoClaw agent container entrypoint.
-#
-# ...existing header comment...
+grep -q 'mnemon setup' src/container-runner.ts && echo "Already wired" || echo "Wire it"
+```
 
+If it prints `Wire it`, change that line so mnemon setup runs first, in the same script, joined with `;` (not `&&` — a mnemon failure, or mnemon simply not being installed, must never block the agent from starting):
+
+```typescript
+  args.push(
+    '-c',
+    'mnemon setup --target claude-code --yes --global >/dev/stderr 2>&1; exec bun run /app/src/index.ts',
+  );
+```
+
+Also add the same line to `container/entrypoint.sh` (right after `set -e`, before the `cat` that captures stdin) for parity with the Dockerfile's own `ENTRYPOINT` — that path is dead for real sessions but is still what `docker run -i <image>` (the manual smoke-test invocation `build.sh` prints) goes through, so keeping it in sync avoids the two paths silently diverging:
+
+```bash
 set -e
 
 mnemon setup --target claude-code --yes --global >/dev/stderr 2>&1
@@ -79,11 +91,9 @@ cat > /tmp/input.json
 exec bun run /app/src/index.ts < /tmp/input.json
 ```
 
-`>/dev/stderr 2>&1` routes all mnemon output to stderr (docker logs) so it doesn't interfere with the JSON stdin handshake between host and agent-runner.
-
 ### 3. Copy the integration tests
 
-Both reach-ins are into container build/runtime files that aren't importable or typed (a GitHub-release binary in the Dockerfile, a shell line in the entrypoint), so structural tests guard them. Copy them into the host test tree:
+Three reach-ins guard files that aren't importable or typed the normal way (a GitHub-release binary in the Dockerfile, a shell line in the entrypoint, an inline shell script string in host TypeScript). Copy the container-level tests into the host test tree; the container-runner regression test is written inline in Step 2's own file, so add it directly to `src/container-runner.test.ts` rather than copying:
 
 ```bash
 cp .claude/skills/add-mnemon/mnemon-dockerfile.test.ts src/mnemon-dockerfile.test.ts
@@ -91,14 +101,25 @@ cp .claude/skills/add-mnemon/mnemon-entrypoint.test.ts src/mnemon-entrypoint.tes
 pnpm exec vitest run src/mnemon-dockerfile.test.ts src/mnemon-entrypoint.test.ts
 ```
 
-`mnemon-dockerfile.test.ts` asserts the `MNEMON_VERSION` ARG and `MNEMON_DATA_DIR` ENV are present (red if the install layer is dropped on an upgrade). `mnemon-entrypoint.test.ts` asserts the entrypoint invokes `mnemon setup --target claude-code` (red if the wiring is removed).
+`mnemon-dockerfile.test.ts` asserts the `MNEMON_VERSION` ARG and `MNEMON_DATA_DIR` ENV are present (red if the install layer is dropped on an upgrade). `mnemon-entrypoint.test.ts` asserts `entrypoint.sh` invokes `mnemon setup --target claude-code` (red if that parity copy is removed — but note this alone does NOT prove hooks work at runtime, see above). Add a matching structural test to `src/container-runner.test.ts` asserting the `-c` script contains `mnemon setup` before `exec bun run`, joined by `;` not `&&` — that's the one that actually guards runtime behavior. Then rebuild the host (`pnpm run build`) since this step edits `src/`.
 
-### 4. Rebuild and smoke-test the image
+### 4. Rebuild the host, rebuild the image, smoke-test the binary
+
+Step 2 edited `src/container-runner.ts`, so the host TypeScript needs rebuilding too, not just the container image:
 
 ```bash
+pnpm run build
 ./container/build.sh
 docker run --rm --entrypoint mnemon nanoclaw-agent:latest --version
 ```
+
+Any agent group with custom apt/npm packages runs a **derived** per-group image built `FROM` the base image (check `container_configs.packages_apt`/`packages_npm` per group, or just `docker images | grep nanoclaw-agent` for extra tags beyond `:latest`). Rebuilding the base image does not touch those — they keep the old base layer (no mnemon) until explicitly rebuilt:
+
+```bash
+ncl groups restart --id <agent-group-id> --rebuild
+```
+
+Do this for every group with a derived image before moving on, or that group's containers will keep spawning without mnemon.
 
 ## Phase 3: Restart and Verify
 
@@ -114,11 +135,13 @@ systemctl --user restart $(systemd_unit)              # Linux
 
 ### Confirm mnemon hooks are registered
 
-After the next container starts, check that setup ran:
+This requires a **real** container spawn — send an actual message to a group wired to this install (a synthetic `docker run` won't exercise `container-runner.ts`'s spawn path). After that, check that setup ran:
 
 ```bash
 docker logs $(docker ps --filter name=nanoclaw-v2 --format '{{.Names}}' | head -1) 2>&1 | grep -i mnemon
 ```
+
+If that's empty, don't assume it's fine — it means setup did not run. Re-check Step 2: confirm the live `-c` script (`grep -n "'-c'," src/container-runner.ts`) actually contains `mnemon setup`, that `pnpm run build` ran after the edit, and that the service was restarted after the build (an unbuilt or unrestarted host keeps spawning containers with the old command).
 
 Then inspect the hooks inside the running container:
 

@@ -78,6 +78,27 @@ describe('per-container resource limits (structural)', () => {
   });
 });
 
+describe('mnemon setup wired into the dynamic spawn command (structural)', () => {
+  // The dynamic spawn overrides the Dockerfile ENTRYPOINT entirely
+  // (`--entrypoint bash` + `-c '<script>'`), so container/entrypoint.sh's own
+  // `mnemon setup` line never executes for real sessions. mnemon setup must be
+  // wired into this inline script directly, or hooks silently never register —
+  // regressed once already (an /add-mnemon install that only touched
+  // entrypoint.sh looked correct but did nothing at runtime). `;` not `&&`:
+  // a mnemon failure (or mnemon simply not being installed) must not block
+  // the agent from starting.
+  it('runs mnemon setup before exec bun, non-fatally, in the same -c script', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
+    const match = src.match(/args\.push\(\s*'-c',\s*'([^']*)'/);
+    expect(match).not.toBeNull();
+    const script = match![1];
+    expect(script).toContain('mnemon setup --target claude-code');
+    expect(script).toContain('exec bun run /app/src/index.ts');
+    expect(script.indexOf('mnemon setup')).toBeLessThan(script.indexOf('exec bun run'));
+    expect(script).not.toMatch(/mnemon setup[^;]*&&/);
+  });
+});
+
 describe('container boot-failure tripwire (structural)', () => {
   // A container that dies at boot (unknown provider, missing CLI binary, bad
   // config) explains itself only on stderr — which logs at debug, below the

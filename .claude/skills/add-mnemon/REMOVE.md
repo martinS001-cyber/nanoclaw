@@ -29,13 +29,23 @@ mnemon setup --target claude-code --yes --global >/dev/stderr 2>&1
 
 If the line is already gone, skip this step.
 
-## 3. Delete the copied test files
+## 3. Strip mnemon setup from the dynamic spawn command
+
+This is the one that actually matters at runtime — see `SKILL.md` Step 2 for why. In `src/container-runner.ts`, find the `args.push('-c', ...)` line and remove the `mnemon setup ...;` prefix, restoring it to:
+
+```typescript
+  args.push('-c', 'exec bun run /app/src/index.ts');
+```
+
+Also remove the matching structural test from `src/container-runner.test.ts` (the `describe('mnemon setup wired into the dynamic spawn command (structural)', ...)` block) if it was added.
+
+## 4. Delete the copied test files
 
 ```bash
 rm -f src/mnemon-dockerfile.test.ts src/mnemon-entrypoint.test.ts
 ```
 
-## 4. Rebuild and restart
+## 5. Rebuild and restart
 
 ```bash
 pnpm run build && ./container/build.sh
@@ -48,7 +58,9 @@ launchctl kickstart -k gui/$(id -u)/$(launchd_label)
 systemctl --user restart $(systemd_unit)
 ```
 
-## 5. Delete stored memory (optional)
+Also rebuild any per-group derived images (`ncl groups restart --id <agent-group-id> --rebuild`) so they pick up the base image without mnemon.
+
+## 6. Delete stored memory (optional)
 
 Mnemon's graph lives at `/home/node/.claude/mnemon/` in each container, which maps to the per-agent-group `.claude/` directory on the host. To find the host path and clear it:
 

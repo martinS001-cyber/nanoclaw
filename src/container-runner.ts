@@ -511,10 +511,7 @@ async function buildContainerArgs(
   // sessions — it must be wired into this command directly. `;` not `&&`:
   // a mnemon failure must not block the agent from starting. Harmless no-op
   // when mnemon isn't installed (command not found, stderr only).
-  args.push(
-    '-c',
-    'mnemon setup --target claude-code --yes --global >/dev/stderr 2>&1; exec bun run /app/src/index.ts',
-  );
+  args.push('-c', 'mnemon setup --target claude-code --yes --global >/dev/stderr 2>&1; exec bun run /app/src/index.ts');
 
   return args;
 }

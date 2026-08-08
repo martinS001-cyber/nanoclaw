@@ -505,13 +505,7 @@ async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  // mnemon setup registers Claude Code hooks on each fresh container. This
-  // dynamic spawn overrides the Dockerfile ENTRYPOINT (tini + entrypoint.sh)
-  // entirely, so entrypoint.sh's own `mnemon setup` line never runs for real
-  // sessions — it must be wired into this command directly. `;` not `&&`:
-  // a mnemon failure must not block the agent from starting. Harmless no-op
-  // when mnemon isn't installed (command not found, stderr only).
-  args.push('-c', 'mnemon setup --target claude-code --yes --global >/dev/stderr 2>&1; exec bun run /app/src/index.ts');
+  args.push('-c', 'exec bun run /app/src/index.ts');
 
   return args;
 }
